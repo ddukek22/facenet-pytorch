@@ -228,7 +228,8 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
     with nvtx_range('pnet'):
         with nvtx_range('pnet:scales'):
             for scale in scales:
-                im_data = imresample(imgs, (int(h * scale + 1), int(w * scale + 1)))
+                with nvtx_range('pnet:scales:interpolate'):
+                    im_data = interpolate(imgs, (int(h * scale + 1), int(w * scale + 1)), mode='area')
                 im_data = (im_data - 127.5) * 0.0078125
 
                 with nvtx_range('pnet:scales:forward'):
