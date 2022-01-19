@@ -3,6 +3,7 @@ from torch import nn
 import numpy as np
 import os
 
+from .utils.tracing import nvtx_range
 from .utils.detect_face import detect_face_scripted
 from .modules import PNet, RNet, ONet
 
@@ -162,14 +163,15 @@ class MTCNN(nn.Module):
                 self.device
             )
 
-        boxes, probs, points = [], [], []
-        for box, point in zip(batch_boxes, batch_points):
-                boxes.append(box[:4])
-                probs.append(torch.atleast_1d(box[4]))
-                points.append(point)
-        boxes = torch.cat(boxes)
-        probs = torch.cat(probs)
-        points = torch.cat(points)
+        with nvtx_range('Postprocess'):
+            boxes, probs, points = [], [], []
+            for box, point in zip(batch_boxes, batch_points):
+                    boxes.append(box[:4])
+                    probs.append(torch.atleast_1d(box[4]))
+                    points.append(point)
+            boxes = torch.cat(boxes)
+            probs = torch.cat(probs)
+            points = torch.cat(points)
 
         if landmarks:
             return boxes, probs, points
