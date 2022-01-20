@@ -388,15 +388,19 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
 
     reg = reg.permute(1, 0, 2, 3)
 
-    mask = (probs >= thresh).cpu()
-    mask_inds = mask.nonzero()
-    image_inds = mask_inds[:, 0]
-    score = probs[mask]
-    reg = reg[:, mask].permute(1, 0)
-    bb = mask_inds[:, 1:].type(reg.dtype).flip(1).to(reg.get_device())
+    mask = (probs >= thresh)
+
+    with nvtx_range('generate_bounding_box:mask_nonzero'):
+        mask_inds = mask.nonzero()
+    with nvtx_range('generate_bounding_box:mask_indexing'):
+        image_inds = mask_inds[:, 0]
+        score = probs[mask]
+        reg = reg[:, mask].permute(1, 0)
+        bb = mask_inds[:, 1:].type(reg.dtype).flip(1)
     q1 = ((stride * bb + 1) / scale).floor()
     q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
-    boundingbox = torch.cat([q1, q2, score.unsqueeze(1), reg], dim=1)
+    with nvtx_range('generate_bounding_box:tensor_creation'):
+        boundingbox = torch.cat([q1, q2, score.unsqueeze(1), reg], dim=1)
     return boundingbox, image_inds
 
 
