@@ -381,6 +381,14 @@ def bbreg(boundingbox, reg):
 
     return boundingbox
 
+def generateBoundingBoxesTopK(reg: torch.Tensor, probs: torch.Tensor, scale: float, thresh: float):
+    stride = 2
+    cellsize = 12
+    reg = reg.permute(1, 0, 2, 3)
+    sorted_ind = probs.argsort(descending=True)
+    probs_sorted = probs.clone().sort(descending=True)
+    probs_sorted
+    return None
 
 def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, thresh: float):
     stride = 2
@@ -388,7 +396,7 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
 
     reg = reg.permute(1, 0, 2, 3)
 
-    mask = (probs >= thresh)
+    mask = (probs >= thresh).cpu()
 
     with nvtx_range('generate_bounding_box:mask_nonzero'):
         mask_inds = mask.nonzero()
@@ -397,8 +405,8 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
         score = probs[mask]
         reg = reg[:, mask].permute(1, 0)
         bb = mask_inds[:, 1:].type(reg.dtype).flip(1)
-    q1 = ((stride * bb + 1) / scale).floor()
-    q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
+    q1 = ((stride * bb + 1) / scale).floor().to(torch.device('cuda'))
+    q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor().to(torch.device('cuda'))
     with nvtx_range('generate_bounding_box:tensor_creation'):
         boundingbox = torch.cat([q1, q2, score.unsqueeze(1), reg], dim=1)
     return boundingbox, image_inds
