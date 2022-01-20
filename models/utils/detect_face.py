@@ -388,12 +388,12 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
 
     reg = reg.permute(1, 0, 2, 3)
 
-    mask = probs >= thresh
+    mask = (probs >= thresh).cpu()
     mask_inds = mask.nonzero()
     image_inds = mask_inds[:, 0]
     score = probs[mask]
     reg = reg[:, mask].permute(1, 0)
-    bb = mask_inds[:, 1:].type(reg.dtype).flip(1)
+    bb = mask_inds[:, 1:].type(reg.dtype).flip(1).to(reg.get_device())
     q1 = ((stride * bb + 1) / scale).floor()
     q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
     boundingbox = torch.cat([q1, q2, score.unsqueeze(1), reg], dim=1)
