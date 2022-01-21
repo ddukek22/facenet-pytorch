@@ -235,7 +235,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
 
                 with nvtx_range('pnet:scales:forward'):
                     reg, probs = pnet.forward(im_data)
-                    probs.to(torch.device('cpu'))
+                    probs = probs.cpu()
                 with nvtx_range('pnet:scales:generate_bounding_box'): 
                     boxes_scale, image_inds_scale = generateBoundingBox(reg, probs[:, 1], scale, threshold[0])
                 boxes.append(boxes_scale)
@@ -419,17 +419,17 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
     with nvtx_range('generate_bounding_box:mask_indexing'):
         image_inds = mask_inds[:, 0] #zeros when N = 1. Indicates which image
         score = probs[mask].pin_memory()
-        score.to(reg.get_device(), non_blocking=True)
+        score = score.to(reg.get_device(), non_blocking=True)
         #(I)
         reg = reg[:, mask].permute(1, 0)
         #(4, I) -> (I, 4)
         bb = mask_inds[:, 1:].type(reg.dtype).flip(1)
         #(I, 2) Elements are indices from probs that are nonzero after thresholding flipped over axis 1 (W,H)
     q1 = ((stride * bb + 1) / scale).floor().pin_memory()
-    q1.to(reg.get_device(), non_blocking=True)
+    q1 = q1.to(reg.get_device(), non_blocking=True)
     # Relative X positions on Image of detection
     q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor().pin_memory()
-    q2.to(reg.get_device(), non_blocking=True)
+    q2 = q2.to(reg.get_device(), non_blocking=True)
     # Relative Y positions on Image of detection
     torch.cuda.synchronize()
     with nvtx_range('generate_bounding_box:tensor_creation'):
