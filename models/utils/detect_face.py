@@ -235,7 +235,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
 
                 with nvtx_range('pnet:scales:forward'):
                     reg, probs = pnet.forward(im_data)
-                    print(probs[:, 1].shape)
+                    torch.cuda.synchronize()
                     probs = probs[:, 1].cpu()
                 with nvtx_range('pnet:scales:generate_bounding_box'): 
                     boxes_scale, image_inds_scale = generateBoundingBox(reg, probs, scale, threshold[0])
