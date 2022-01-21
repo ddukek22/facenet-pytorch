@@ -276,16 +276,18 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             ex = ex.cpu()
             image_inds_cpu = image_inds.clone().to(torch.device('cpu'))
     
+    cuda_stream = torch.cuda.Stream(torch.device('cuda:0'))
     with nvtx_range('rnet'):
         # Second stage
         if len(boxes) > 0:
             with nvtx_range('rnet:resample'):
                 im_data = []
-                for k in range(len(y)):
-                    if ey[k] > (y[k] - 1) and ex[k] > (x[k] - 1):
-                        img_k = imgs[image_inds_cpu[k], :, (y[k] - 1):ey[k], (x[k] - 1):ex[k]].unsqueeze(0)
-                        im_data.append(imresample(img_k, (24, 24)))
-            
+                with torch.cuda.stream(cuda_stream):
+                    for k in range(len(y)):
+                        if ey[k] > (y[k] - 1) and ex[k] > (x[k] - 1):
+                            img_k = imgs[image_inds_cpu[k], :, (y[k] - 1):ey[k], (x[k] - 1):ex[k]].unsqueeze(0)
+                            im_data.append(imresample(img_k, (24, 24)))
+                cuda_stream.synchronize() 
                 im_data = torch.cat(im_data, dim=0)
                 im_data = (im_data - 127.5) * 0.0078125
 
