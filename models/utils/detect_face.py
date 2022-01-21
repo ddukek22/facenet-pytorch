@@ -270,9 +270,9 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             boxes = torch.stack([qq1, qq2, qq3, qq4, boxes[:, 4]]).permute(1, 0)
             boxes = rerec(boxes)
             y, ey, x, ex = pad(boxes, w, h)
-            y = y.cpu()
+            y = y.cpu() - 1
             ey = ey.cpu()
-            x = x.cpu()
+            x = x.cpu() - 1
             ex = ex.cpu()
             image_inds_cpu = image_inds.clone().to(torch.device('cpu'))
     
@@ -282,11 +282,11 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             with nvtx_range('rnet:resample'):
                 im_data = []
                 for k in range(len(y)):
-                    if ey[k] > (y[k] - 1) and ex[k] > (x[k] - 1):
-                        img_k = imgs[image_inds_cpu[k], :, (y[k] - 1):ey[k], (x[k] - 1):ex[k]].unsqueeze(0)
-                        im_data.append(imresample(img_k, (24, 24)))
+                    img_k = imgs[image_inds_cpu[k], :, (y[k] - 1):ey[k], (x[k] - 1):ex[k]].unsqueeze(0)
+                    im_data.append(img_k)
             
                 im_data = torch.cat(im_data, dim=0)
+                im_data = interpolate(img_k, (24, 24))
                 im_data = (im_data - 127.5) * 0.0078125
 
             with nvtx_range('rnet:forward'):
@@ -496,10 +496,22 @@ def pad(boxes: torch.Tensor, w: int, h: int):
     ex = boxes[:, 2]
     ey = boxes[:, 3]
 
-    x[x < 1] = 1
-    y[y < 1] = 1
-    ex[ex > w] = w
-    ey[ey > h] = h
+    maxw_mask = ex > w
+    maxh_mask = ey > h
+    minw_mask = x < 1
+    minh_mask = y < 1
+
+    #expand boxes where the standard size crop will be oob and clamped.
+    x[maxw_mask] = x[maxw_mask] - (ex[maxw_mask] - w)
+    y[maxh_mask] = y[maxh_mask] - (ey[maxh_mask] - h)
+    ex[minw_mask] = ex[minw_mask] + (x[minw_mask] + 1)
+    ey[minh_mask] = ey[minh_mask] + (y[minh_mask] + 1)
+
+
+    x[minw_mask] = 1
+    y[minh_mask] = 1
+    ex[maxw_mask] = w
+    ey[maxh_mask] = h
 
     return y, ey, x, ex
 
@@ -508,10 +520,10 @@ def rerec(bboxA):
     h = bboxA[:, 3] - bboxA[:, 1]
     w = bboxA[:, 2] - bboxA[:, 0]
     
-    l = torch.max(w, h)
+    l = torch.max(torch.max(w, h))
     bboxA[:, 0] = bboxA[:, 0] + w * 0.5 - l * 0.5
     bboxA[:, 1] = bboxA[:, 1] + h * 0.5 - l * 0.5
-    bboxA[:, 2:4] = bboxA[:, :2] + l.repeat(2, 1).permute(1, 0)
+    bboxA[:, 2:4] = bboxA[:, :2] + l
 
     return bboxA
 
