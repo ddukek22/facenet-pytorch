@@ -323,7 +323,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 im_data = []
                 for k in range(len(y)):
                     img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                    img_k = interpolate(im_data, (48, 48), mode='area')
+                    img_k = interpolate(img_k, (48, 48), mode='area')
                     im_data.append(img_k)
                 im_data = torch.cat(im_data, dim=0)
                 im_data = (im_data - 127.5) * 0.0078125
@@ -528,7 +528,7 @@ def rerec(bboxA):
     l = torch.max(w, h)
     bboxA[:, 0] = bboxA[:, 0] + torch.floor(w * 0.5) - torch.floor(l * 0.5)
     bboxA[:, 1] = bboxA[:, 1] + torch.floor(h * 0.5) - torch.floor(l * 0.5)
-    bboxA[:, 2:4] = (bboxA[:, :2] + l).floor()
+    bboxA[:, 2:4] = (bboxA[:, :2] + l.repeat(2, 1).permute(1, 0)).floor()
 
     return bboxA
 
