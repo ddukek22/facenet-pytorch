@@ -113,6 +113,7 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
     boxes = rerec(boxes)
     y, ey, x, ex = pad(boxes, w, h)
     
+    
     # Second stage
     if len(boxes) > 0:
         im_data = []
@@ -234,7 +235,6 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
 
                 with nvtx_range('pnet:scales:forward'):
                     reg, probs = pnet.forward(im_data)
-
                 with nvtx_range('pnet:scales:generate_bounding_box'): 
                     boxes_scale, image_inds_scale = generateBoundingBox(reg, probs[:, 1], scale, threshold[0])
                 boxes.append(boxes_scale)
@@ -270,6 +270,10 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             boxes = torch.stack([qq1, qq2, qq3, qq4, boxes[:, 4]]).permute(1, 0)
             boxes = rerec(boxes)
             y, ey, x, ex = pad(boxes, w, h)
+            y = y.cpu()
+            ey = ey.cpu()
+            x = x.cpu()
+            ex = ex.cpu()
     
     with nvtx_range('rnet'):
         # Second stage
@@ -310,6 +314,10 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
         if len(boxes) > 0:
             with nvtx_range('onet:resample'):
                 y, ey, x, ex = pad(boxes, w, h)
+                y = y.cpu()
+                ey = ey.cpu()
+                x = x.cpu()
+                ex = ex.cpu()
                 im_data = []
                 for k in range(len(y)):
                     if ey[k] > (y[k] - 1) and ex[k] > (x[k] - 1):
@@ -391,22 +399,33 @@ def generateBoundingBoxesTopK(reg: torch.Tensor, probs: torch.Tensor, scale: flo
     return None
 
 def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, thresh: float):
-    stride = 2
-    cellsize = 12
+    '''
+    reg: (N, 4, H, W)
+    probs: (N, H, W)
+    '''
+    stride = 2 # Convolution stride length of output kernel of pnet
+    cellsize = 12 # Matches m Scaling Factor from line 211
 
     reg = reg.permute(1, 0, 2, 3)
+    # (4, N, H, W)
 
-    mask = (probs >= thresh).cpu()
-
+    mask = (probs >= thresh)
+    #(N, H, W)
     with nvtx_range('generate_bounding_box:mask_nonzero'):
         mask_inds = mask.nonzero()
+        #(0 <= I <= H*W, 3) indices of nonzero elements in 3D tensor
     with nvtx_range('generate_bounding_box:mask_indexing'):
-        image_inds = mask_inds[:, 0]
+        image_inds = mask_inds[:, 0] #zeros when N = 1. Indicates which image
         score = probs[mask]
+        #(I)
         reg = reg[:, mask].permute(1, 0)
+        #(4, I) -> (I, 4)
         bb = mask_inds[:, 1:].type(reg.dtype).flip(1)
-    q1 = ((stride * bb + 1) / scale).floor().to(torch.device('cuda'))
-    q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor().to(torch.device('cuda'))
+        #(I, 2) Elements are indices from probs that are nonzero after thresholding flipped over axis 1 (W,H)
+    q1 = ((stride * bb + 1) / scale).floor()
+    # Relative X positions on Image of detection
+    q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
+    # Relative Y positions on Image of detection
     with nvtx_range('generate_bounding_box:tensor_creation'):
         boundingbox = torch.cat([q1, q2, score.unsqueeze(1), reg], dim=1)
     return boundingbox, image_inds
