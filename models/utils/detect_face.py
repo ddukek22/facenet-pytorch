@@ -269,6 +269,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             qq4 = boxes[:, 3] + boxes[:, 8] * regh
             boxes = torch.stack([qq1, qq2, qq3, qq4, boxes[:, 4]]).permute(1, 0)
             boxes = rerec(boxes)
+            print(boxes)
             y, ey, x, ex = pad(boxes, w, h)
             y = y.cpu()
             ey = ey.cpu()
@@ -282,11 +283,11 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             with nvtx_range('rnet:resample'):
                 im_data = []
                 for k in range(len(y)):
-                    img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]]
+                    img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
                     im_data.append(img_k)
             
                 im_data = torch.cat(im_data, dim=0)
-                im_data = interpolate(im_data, (24, 24))
+                im_data = interpolate(im_data, (24, 24), mode='area')
                 im_data = (im_data - 127.5) * 0.0078125
 
             with nvtx_range('rnet:forward'):
@@ -298,16 +299,19 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 out1 = out[1].permute(1, 0)
                 score = out1[1, :]
                 ipass = score > threshold[1]
+                print(ipass)
                 boxes = torch.cat((boxes[ipass, :4], score[ipass].unsqueeze(1)), dim=1)
+                print(boxes)
                 image_inds = image_inds[ipass]
                 mv = out0[:, ipass].permute(1, 0)
 
                 # NMS within each image
                 pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
                 boxes, image_inds, mv = boxes[pick], image_inds[pick], mv[pick]
-            
+            print(boxes) 
             boxes = bbreg(boxes, mv)
             boxes = rerec(boxes)
+            print(boxes)
 
     with nvtx_range('onet'):
         # Third stage
@@ -323,8 +327,9 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 im_data = []
                 for k in range(len(y)):
                     img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                    im_data.append(imresample(img_k, (48, 48)))
+                    im_data.append(img_k)
                 im_data = torch.cat(im_data, dim=0)
+                im_data = interpolate(im_data, (48, 48), mode='area')
                 im_data = (im_data - 127.5) * 0.0078125
             
             # This is equivalent to out = onet(im_data) to avoid GPU out of memory.
@@ -489,10 +494,10 @@ def batched_nms_numpy(boxes, scores, idxs, threshold, method):
 
 
 def pad(boxes: torch.Tensor, w: int, h: int):
-    x = boxes[:, 0]
-    y = boxes[:, 1]
-    ex = boxes[:, 2]
-    ey = boxes[:, 3]
+    x = boxes[:, 0].int()
+    y = boxes[:, 1].int()
+    ex = boxes[:, 2].int()
+    ey = boxes[:, 3].int()
 
     maxw_mask = ex > w
     maxh_mask = ey > h
@@ -515,14 +520,15 @@ def pad(boxes: torch.Tensor, w: int, h: int):
 
 
 def rerec(bboxA):
+    if bboxA.shape[0] == 0:
+        return bboxA
     h = bboxA[:, 3] - bboxA[:, 1]
     w = bboxA[:, 2] - bboxA[:, 0]
     
     l = torch.floor(torch.max(torch.max(w, h)))
     bboxA[:, 0] = bboxA[:, 0] + torch.floor(w * 0.5) - torch.floor(l * 0.5)
     bboxA[:, 1] = bboxA[:, 1] + torch.floor(h * 0.5) - torch.floor(l * 0.5)
-    bboxA[:, 2:4] = bboxA[:, :2] + l
-    bboxA = bboxA.floor().int()
+    bboxA[:, 2:4] = (bboxA[:, :2] + l).floor()
 
     return bboxA
 
