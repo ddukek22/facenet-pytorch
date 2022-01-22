@@ -206,7 +206,6 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
     with nvtx_range('Preprocess'):
         model_dtype = torch.float32
         imgs = imgs.permute(0, 3, 1, 2).type(model_dtype)
-        torch.memory_forma
         batch_size = len(imgs)
         h, w = imgs.shape[2:4]
         m = 12.0 / minsize
