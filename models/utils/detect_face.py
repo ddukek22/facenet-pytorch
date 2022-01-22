@@ -511,7 +511,7 @@ def pad(boxes: torch.Tensor, w: int, h: int):
     ex[maxw_mask] = w
     ey[maxh_mask] = h
     
-    return torch.stack(y, ey, x, ex)
+    return torch.stack([y, ey, x, ex])
 
 
 def rerec(bboxA):
