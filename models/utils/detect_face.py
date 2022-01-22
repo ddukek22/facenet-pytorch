@@ -206,7 +206,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
     with nvtx_range('Preprocess'):
         model_dtype = torch.float32
         imgs = imgs.permute(0, 3, 1, 2).type(model_dtype)
-
+        torch.memory_forma
         batch_size = len(imgs)
         h, w = imgs.shape[2:4]
         m = 12.0 / minsize
@@ -231,13 +231,11 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             for scale in scales:
                 with nvtx_range('pnet:scales:interpolate'):
                     im_data = F.resize(imgs, (int(h * scale + 1), int(w * scale + 1)))
-                    torch.cuda.synchronize()
                 im_data = (im_data - 127.5) * 0.0078125
 
                 with nvtx_range('pnet:scales:forward'):
                     reg, probs = pnet.forward(im_data)
-                    torch.cuda.synchronize()
-                    probs = probs[:, 1].cpu()
+                    probs = probs[:, 1]
                 with nvtx_range('pnet:scales:generate_bounding_box'): 
                     boxes_scale, image_inds_scale = generateBoundingBox(reg, probs, scale, threshold[0])
                 boxes.append(boxes_scale)
@@ -272,11 +270,11 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             qq4 = boxes[:, 3] + boxes[:, 8] * regh
             boxes = torch.stack([qq1, qq2, qq3, qq4, boxes[:, 4]]).permute(1, 0)
             boxes = rerec(boxes)
-            y, ey, x, ex = pad(boxes, w, h)
-            y = y.cpu()
-            ey = ey.cpu()
-            x = x.cpu()
-            ex = ex.cpu()
+            padded_boxes = pad(boxes, w, h).cpu()
+            y = padded_boxes[0]
+            ey = padded_boxes[1]
+            x = padded_boxes[2]
+            ex = padded_boxes[3]
             image_inds_cpu = image_inds.clone().to(torch.device('cpu'))
     
     with nvtx_range('rnet'):
@@ -286,7 +284,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 im_data = []
                 for k in range(len(y)):
                     img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                    img_k = interpolate(img_k, (24, 24), mode='area')
+                    img_k = F.resize(img_k, (24, 24))
                     im_data.append(img_k)
             
                 im_data = torch.cat(im_data, dim=0)
@@ -316,16 +314,16 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
         points = torch.zeros(0, 5, 2, device=device)
         if len(boxes) > 0:
             with nvtx_range('onet:resample'):
-                y, ey, x, ex = pad(boxes, w, h)
-                y = y.cpu()
-                ey = ey.cpu()
-                x = x.cpu()
-                ex = ex.cpu()
+                padded_boxes = pad(boxes, w, h).cpu()
+                y = padded_boxes[0]
+                ey = padded_boxes[1]
+                x = padded_boxes[2]
+                ex = padded_boxes[3]
                 image_inds_cpu = image_inds.clone().to(torch.device('cpu'))
                 im_data = []
                 for k in range(len(y)):
                     img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                    img_k = interpolate(img_k, (48, 48), mode='area')
+                    img_k = F.resize(img_k, (48, 48))
                     im_data.append(img_k)
                 im_data = torch.cat(im_data, dim=0)
                 im_data = (im_data - 127.5) * 0.0078125
@@ -420,20 +418,16 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
         #(0 <= I <= H*W, 3) indices of nonzero elements in 3D tensor
     with nvtx_range('generate_bounding_box:mask_indexing'):
         image_inds = mask_inds[:, 0] #zeros when N = 1. Indicates which image
-        score = probs[mask].pin_memory()
-        score = score.to(reg.get_device(), non_blocking=True)
+        score = probs[mask]
         #(I)
         reg = reg[:, mask].permute(1, 0)
         #(4, I) -> (I, 4)
         bb = mask_inds[:, 1:].type(reg.dtype).flip(1)
         #(I, 2) Elements are indices from probs that are nonzero after thresholding flipped over axis 1 (W,H)
-    q1 = ((stride * bb + 1) / scale).floor().pin_memory()
-    q1 = q1.to(reg.get_device(), non_blocking=True)
+    q1 = ((stride * bb + 1) / scale).floor()
     # Relative X positions on Image of detection
-    q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor().pin_memory()
-    q2 = q2.to(reg.get_device(), non_blocking=True)
+    q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
     # Relative Y positions on Image of detection
-    torch.cuda.synchronize()
     with nvtx_range('generate_bounding_box:tensor_creation'):
         boundingbox = torch.cat([q1, q2, score.unsqueeze(1), reg], dim=1)
     return boundingbox, image_inds
@@ -518,7 +512,7 @@ def pad(boxes: torch.Tensor, w: int, h: int):
     ex[maxw_mask] = w
     ey[maxh_mask] = h
     
-    return y, ey, x, ex
+    return torch.stack(y, ey, x, ex)
 
 
 def rerec(bboxA):
