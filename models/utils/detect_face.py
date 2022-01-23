@@ -249,7 +249,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 boxes_scale = bbreg(boxes_scale, mv)
                 boxes_scale = rerec(boxes_scale)
                 boxes.append(boxes_scale)
-                scale_inds.append(torch.ones(boxes_scale.shape[0], device=boxes_scale.get_device()) * scale)
+                scale_inds.append(torch.ones(boxes_scale.shape[0], device=boxes_scale.device) * scale)
 
                 #All boxes from detections at same scale are same size
                 scale_picks.append(pick + offset)
@@ -269,8 +269,6 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             ey = padded_boxes[1]
             x = padded_boxes[2]
             ex = padded_boxes[3]
-            image_inds_cpu = image_inds.cpu()
-            scale_inds_cpu = scale_inds.cpu()
         
     with nvtx_range('rnet'):
         # Second stage
@@ -278,12 +276,12 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             with nvtx_range('rnet:resample'):
                 im_data = []
                 for scale in scales:
-                    inds = (scale_inds_cpu == scale).nonzero().ravel().tolist()
+                    inds = (scale_inds == scale).nonzero().ravel().tolist()
                     imgs_scale = []
                     for k in inds:
                         #All boxes detected at same scale should be same size so they can be batched
                         #into single resize call
-                        img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+                        img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
                         imgs_scale.append(img_k)
                     if len(imgs_scale) > 0:
                         imgs_scale = torch.cat(imgs_scale, dim=0)
@@ -299,11 +297,11 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             with nvtx_range('rnet:nms'):
                 out0 = out[0].permute(1, 0)
                 out1 = out[1].permute(1, 0)
-                score = out1[1, :]
-                ipass = score > threshold[1]
+                score = out1[1, :].cpu()
+                ipass = (score > threshold[1]).cpu()
                 boxes = torch.cat((boxes[ipass, :4], score[ipass].unsqueeze(1)), dim=1)
                 image_inds = image_inds[ipass]
-                mv = out0[:, ipass].permute(1, 0)
+                mv = out0[:, ipass].permute(1, 0).cpu()
 
                 # NMS within each image
                 pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
@@ -321,10 +319,9 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 ey = padded_boxes[1]
                 x = padded_boxes[2]
                 ex = padded_boxes[3]
-                image_inds_cpu = image_inds.clone().to(torch.device('cpu'))
                 im_data = []
                 for k in range(len(y)):
-                    img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+                    img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
                     img_k = F.resize(img_k, (48, 48))
                     im_data.append(img_k)
                 im_data = torch.cat(im_data, dim=0)
@@ -340,13 +337,13 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 out0 = out[0].permute(1, 0)
                 out1 = out[1].permute(1, 0)
                 out2 = out[2].permute(1, 0)
-                score = out2[1, :]
-                points = out1
-                ipass = score > threshold[2]
+                score = out2[1, :].cpu()
+                points = out1.cpu()
+                ipass = (score > threshold[2]).cpu()
                 points = points[:, ipass]
                 boxes = torch.cat((boxes[ipass, :4], score[ipass].unsqueeze(1)), dim=1)
                 image_inds = image_inds[ipass]
-                mv = out0[:, ipass].permute(1, 0)
+                mv = out0[:, ipass].permute(1, 0).cpu()
 
                 w_i = boxes[:, 2] - boxes[:, 0] + 1
                 h_i = boxes[:, 3] - boxes[:, 1] + 1
@@ -494,10 +491,10 @@ def batched_nms_numpy(boxes, scores, idxs, threshold, method):
 
 
 def pad(boxes: torch.Tensor, w: int, h: int):
-    x = boxes[:, 0]
-    y = boxes[:, 1]
-    ex = boxes[:, 2]
-    ey = boxes[:, 3]
+    x = boxes[:, 0].int()
+    y = boxes[:, 1].int()
+    ex = boxes[:, 2].int()
+    ey = boxes[:, 3].int()
 
     maxw_mask = ex > w
     maxh_mask = ey > h
@@ -529,7 +526,7 @@ def rerec(bboxA):
 
     bboxA[:, 0] = torch.floor(bboxA[:, 0] + torch.floor(w * 0.5) - torch.floor(l * 0.5))
     bboxA[:, 1] = torch.floor(bboxA[:, 1] + torch.floor(h * 0.5) - torch.floor(l * 0.5))
-    bboxA[:, 2:4] = (bboxA[:, :2] + l).floor().type(torch.int16)
+    bboxA[:, 2:4] = (bboxA[:, :2] + l).floor().int()
 
     return bboxA
 
