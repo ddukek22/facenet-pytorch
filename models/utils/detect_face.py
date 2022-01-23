@@ -249,7 +249,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 boxes_scale = bbreg(boxes_scale, mv)
                 boxes_scale = rerec(boxes_scale)
                 boxes.append(boxes_scale)
-                scale_inds.append(torch.ones(boxes_scale.shape[0], device=reg.get_device()) * scale)
+                scale_inds.append(torch.ones(boxes_scale.shape[0], device=boxes_scale.get_device()) * scale)
 
                 #All boxes from detections at same scale are same size
                 scale_picks.append(pick + offset)
@@ -410,10 +410,13 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
     stride = 2 # Convolution stride length of output kernel of pnet
     cellsize = 12 # Matches m Scaling Factor from line 211
 
-    reg = reg.permute(1, 0, 2, 3)
+    reg = reg
     # (4, N, H, W)
 
     mask = (probs >= thresh)
+    reg_ret = reg.permute(1, 0, 2, 3)[:, mask].permute(1, 0).cpu()
+    mask = mask.cpu()
+    probs = probs.cpu()
     #(N, H, W)
     with nvtx_range('generate_bounding_box:mask_nonzero'):
         mask_inds = mask.nonzero()
@@ -422,9 +425,8 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
         image_inds = mask_inds[:, 0] #zeros when N = 1. Indicates which image
         score = probs[mask]
         #(I)
-        reg = reg[:, mask].permute(1, 0)
         #(4, I) -> (I, 4)
-        bb = mask_inds[:, 1:].type(reg.dtype).flip(1)
+        bb = mask_inds[:, 1:].type(reg_ret.dtype).flip(1)
         #(I, 2) Elements are indices from probs that are nonzero after thresholding flipped over axis 1 (W,H)
     q1 = ((stride * bb + 1) / scale).floor()
     # Relative X positions on Image of detection
@@ -432,7 +434,7 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
     # Relative Y positions on Image of detection
     with nvtx_range('generate_bounding_box:tensor_creation'):
         boundingbox = torch.cat([q1, q2, score.unsqueeze(1)], dim=1)
-    return boundingbox, image_inds, reg
+    return boundingbox, image_inds, reg_ret
 
 
 def nms_numpy(boxes, scores, threshold, method):
@@ -492,10 +494,10 @@ def batched_nms_numpy(boxes, scores, idxs, threshold, method):
 
 
 def pad(boxes: torch.Tensor, w: int, h: int):
-    x = boxes[:, 0].int()
-    y = boxes[:, 1].int()
-    ex = boxes[:, 2].int()
-    ey = boxes[:, 3].int()
+    x = boxes[:, 0]
+    y = boxes[:, 1]
+    ex = boxes[:, 2]
+    ey = boxes[:, 3]
 
     maxw_mask = ex > w
     maxh_mask = ey > h
@@ -527,7 +529,7 @@ def rerec(bboxA):
 
     bboxA[:, 0] = torch.floor(bboxA[:, 0] + torch.floor(w * 0.5) - torch.floor(l * 0.5))
     bboxA[:, 1] = torch.floor(bboxA[:, 1] + torch.floor(h * 0.5) - torch.floor(l * 0.5))
-    bboxA[:, 2:4] = (bboxA[:, :2] + l).floor()
+    bboxA[:, 2:4] = (bboxA[:, :2] + l).floor().type(torch.int16)
 
     return bboxA
 
