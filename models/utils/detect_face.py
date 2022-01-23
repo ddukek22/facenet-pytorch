@@ -278,12 +278,12 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             with nvtx_range('rnet:resample'):
                 im_data = []
                 for scale in scales:
-                    inds = (scale_inds_cpu == scale).nonzero().tolist()
+                    inds = (scale_inds_cpu == scale).nonzero().ravel().tolist()
                     imgs_scale = []
                     for k in inds:
                         #All boxes detected at same scale should be same size so they can be batched
                         #into single resize call
-                        img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]]
+                        img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
                         imgs_scale.append(img_k)
                     if len(imgs_scale) > 0:
                         imgs_scale = torch.cat(imgs_scale, dim=0)
