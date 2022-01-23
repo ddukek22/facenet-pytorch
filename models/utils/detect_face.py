@@ -236,9 +236,8 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 with nvtx_range('pnet:scales:forward'):
                     reg, probs = pnet.forward(im_data)
                     probs = probs[:, 1]
-                    mv = reg[probs > threshold[0]]
                 with nvtx_range('pnet:scales:generate_bounding_box'): 
-                    boxes_scale, image_inds_scale = generateBoundingBox(reg, probs, scale, threshold[0])
+                    boxes_scale, image_inds_scale, mv = generateBoundingBox(reg, probs, scale, threshold[0])
 
                 #NMS within each scale / image
                 with nvtx_range('pnet:scales:nms'):
@@ -246,10 +245,12 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 image_inds_scale = image_inds_scale[pick]
                 image_inds.append(image_inds_scale)
                 boxes_scale = boxes_scale[pick]
+                mv = mv[pick]
                 boxes_scale = bbreg(boxes_scale, mv)
                 boxes_scale = rerec(boxes_scale)
-                scale_inds.append(torch.ones(boxes_scale.shape[0], device=torch.device('cpu')) * scale)
                 boxes.append(boxes_scale)
+                scale_inds.append(torch.ones(boxes_scale.shape[0], device=reg.get_device()) * scale)
+
                 #All boxes from detections at same scale are same size
                 scale_picks.append(pick + offset)
                 offset += boxes_scale.shape[0]
@@ -262,29 +263,31 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
         
         with nvtx_range('pnet:postprocess'):
-            boxes, image_inds = boxes[pick], image_inds[pick] 
+            boxes, image_inds, scale_inds = boxes[pick], image_inds[pick], scale_inds[pick]
             padded_boxes = pad(boxes, w, h).cpu()
             y = padded_boxes[0]
             ey = padded_boxes[1]
             x = padded_boxes[2]
             ex = padded_boxes[3]
-            image_inds_cpu = image_inds.clone().to(torch.device('cpu'))
-    
+            image_inds_cpu = image_inds.cpu()
+            scale_inds_cpu = scale_inds.cpu()
+        
     with nvtx_range('rnet'):
         # Second stage
         if len(boxes) > 0:
             with nvtx_range('rnet:resample'):
                 im_data = []
                 for scale in scales:
-                    inds = scale_inds[scale_inds == scale].nonzero()
+                    inds = (scale_inds_cpu == scale).nonzero()
                     imgs_scale = []
                     for k in inds:
                         #All boxes detected at same scale should be same size so they can be batched
                         #into single resize call
-                        img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+                        img_k = imgs[image_inds_cpu[k], :, y[k]:ey[k], x[k]:ex[k]]
                         imgs_scale.append(img_k)
-                    imgs_scale = torch.cat(imgs_scale, dim=0)
-                    im_data.append(F.resize(imgs_scale, (24, 24)))
+                    if len(imgs_scale) > 0:
+                        imgs_scale = torch.cat(imgs_scale, dim=0)
+                        im_data.append(F.resize(imgs_scale, (24, 24)))
             
                 im_data = torch.cat(im_data, dim=0)
                 im_data = (im_data - 127.5) * 0.0078125
@@ -429,7 +432,7 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
     # Relative Y positions on Image of detection
     with nvtx_range('generate_bounding_box:tensor_creation'):
         boundingbox = torch.cat([q1, q2, score.unsqueeze(1)], dim=1)
-    return boundingbox, image_inds
+    return boundingbox, image_inds, reg
 
 
 def nms_numpy(boxes, scores, threshold, method):
@@ -520,10 +523,10 @@ def rerec(bboxA):
     h = bboxA[:, 3] - bboxA[:, 1]
     w = bboxA[:, 2] - bboxA[:, 0]
     
-    l = torch.max(torch.max(w, h))
+    l = torch.floor(torch.max(torch.max(w, h)))
 
-    bboxA[:, 0] = bboxA[:, 0] + torch.floor(w * 0.5) - torch.floor(l * 0.5)
-    bboxA[:, 1] = bboxA[:, 1] + torch.floor(h * 0.5) - torch.floor(l * 0.5)
+    bboxA[:, 0] = torch.floor(bboxA[:, 0] + torch.floor(w * 0.5) - torch.floor(l * 0.5))
+    bboxA[:, 1] = torch.floor(bboxA[:, 1] + torch.floor(h * 0.5) - torch.floor(l * 0.5))
     bboxA[:, 2:4] = (bboxA[:, :2] + l).floor()
 
     return bboxA
