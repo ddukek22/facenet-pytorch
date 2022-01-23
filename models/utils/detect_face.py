@@ -215,7 +215,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
         # Create scale pyramid
         start = 0
         end = math.floor(math.log(12 / minl) / math.log(factor))
-        scales = torch.logspace(end, start, end, factor).multiply(m)
+        scales = torch.logspace(end, start, end, factor).cpu().multiply(m)
 
         # First stage
         boxes = []
@@ -278,7 +278,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             with nvtx_range('rnet:resample'):
                 im_data = []
                 for scale in scales:
-                    inds = (scale_inds_cpu == scale).nonzero()
+                    inds = (scale_inds_cpu == scale).nonzero().tolist()
                     imgs_scale = []
                     for k in inds:
                         #All boxes detected at same scale should be same size so they can be batched
