@@ -11,7 +11,6 @@ import math
 import typing
 
 from ..modules import PNet, RNet, ONet
-from .tracing import nvtx_range
 
 # OpenCV is optional, but required if using numpy arrays instead of PIL
 try:
@@ -203,185 +202,164 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
         The function is already written to be able to operate on torch tensors
         that are on the GPU.
     '''  
-    with nvtx_range('Preprocess'):
-        model_dtype = torch.float32
-        imgs = imgs.permute(0, 3, 1, 2).type(model_dtype)
-        batch_size = len(imgs)
-        h, w = imgs.shape[2:4]
-        m = 12.0 / minsize
-        minl = min(h, w)
-        minl = minl * m
+    model_dtype = torch.float32
+    imgs = imgs.permute(0, 3, 1, 2).type(model_dtype)
+    batch_size = len(imgs)
+    h, w = imgs.shape[2:4]
+    m = 12.0 / minsize
+    minl = min(h, w)
+    minl = minl * m
 
-        # Create scale pyramid
-        start = 0
-        end = math.floor(math.log(12 / minl) / math.log(factor))
-        scales = torch.logspace(end, start, end, factor).cpu().multiply(m)
+    # Create scale pyramid
+    start = 0
+    end = math.floor(math.log(12 / minl) / math.log(factor))
+    scales = torch.logspace(end, start, end, factor).cpu().multiply(m)
 
-        # First stage
-        boxes = []
-        image_inds = []
+    # First stage
+    boxes = []
+    image_inds = []
 
-        scale_picks = []
-        scale_inds = []
+    scale_picks = []
+    scale_inds = []
 
-        offset = 0
+    offset = 0
 
-    with nvtx_range('pnet'):
-        with nvtx_range('pnet:scales'):
-            for scale in scales:
-                with nvtx_range('pnet:scales:interpolate'):
-                    im_data = F.resize(imgs, (int(h * scale + 1), int(w * scale + 1)))
-                im_data = (im_data - 127.5) * 0.0078125
+    for scale in scales:
+        im_data = F.resize(imgs, (int(h * scale + 1), int(w * scale + 1)))
+        im_data = (im_data - 127.5) * 0.0078125
 
-                with nvtx_range('pnet:scales:forward'):
-                    reg, probs = pnet.forward(im_data)
-                    probs = probs[:, 1]
-                with nvtx_range('pnet:scales:generate_bounding_box'): 
-                    boxes_scale, image_inds_scale, mv = generateBoundingBox(reg, probs, scale, threshold[0])
+        reg, probs = pnet.forward(im_data)
+        probs = probs[:, 1]
+        boxes_scale, image_inds_scale, mv = generateBoundingBox(reg, probs, scale, threshold[0])
 
-                #NMS within each scale / image
-                with nvtx_range('pnet:scales:nms'):
-                    pick = batched_nms(boxes_scale[:, :4], boxes_scale[:, 4], image_inds_scale, 0.5)
-                with nvtx_range('pnet:scales:postprocess'):
-                    image_inds_scale = image_inds_scale[pick]
-                    image_inds.append(image_inds_scale)
-                    boxes_scale = boxes_scale[pick]
-                    mv = mv[pick]
-                    boxes_scale = bbreg(boxes_scale, mv)
-                    boxes_scale = rerec(boxes_scale, match_area=False)
-                    boxes.append(boxes_scale)
-                    scale_inds.append(torch.ones(boxes_scale.shape[0], device=boxes_scale.device) * scale)
+        #NMS within each scale / image
+        pick = batched_nms(boxes_scale[:, :4], boxes_scale[:, 4], image_inds_scale, 0.5)
+        image_inds_scale = image_inds_scale[pick]
+        image_inds.append(image_inds_scale)
+        boxes_scale = boxes_scale[pick]
+        mv = mv[pick]
+        boxes_scale = bbreg(boxes_scale, mv)
+        boxes_scale = rerec(boxes_scale, match_area=False)
+        boxes.append(boxes_scale)
+        scale_inds.append(torch.ones(boxes_scale.shape[0], device=boxes_scale.device) * scale)
 
-        with nvtx_range('pnet:nms'):
-            boxes = torch.cat(boxes, dim=0)
-            scale_inds = torch.cat(scale_inds, dim=0)
-            image_inds = torch.cat(image_inds, dim=0)
-            # NMS within each image
-            pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
+    boxes = torch.cat(boxes, dim=0)
+    scale_inds = torch.cat(scale_inds, dim=0)
+    image_inds = torch.cat(image_inds, dim=0)
+    # NMS within each image
+    pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
+    
+    boxes, image_inds, scale_inds = boxes[pick], image_inds[pick], scale_inds[pick]
+    padded_boxes = pad(boxes, w, h).cpu()
+    y = padded_boxes[0]
+    ey = padded_boxes[1]
+    x = padded_boxes[2]
+    ex = padded_boxes[3]
         
-        with nvtx_range('pnet:postprocess'):
-            boxes, image_inds, scale_inds = boxes[pick], image_inds[pick], scale_inds[pick]
-            padded_boxes = pad(boxes, w, h).cpu()
-            y = padded_boxes[0]
-            ey = padded_boxes[1]
-            x = padded_boxes[2]
-            ex = padded_boxes[3]
-        
-    with nvtx_range('rnet'):
         # Second stage
-        if len(boxes) > 0:
-            with nvtx_range('rnet:resample'):
-                im_data = []
-                for k in range(len(y)):
-                    img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                    img_k = F.resize(img_k, (24,24))
-                    im_data.append(img_k)
-                '''
-                for scale in scales:
-                    inds = (scale_inds == scale).nonzero().ravel().tolist()
-                    imgs_scale = []
-                    for k in inds:
-                        #All boxes detected at same scale should be same size so they can be batched
-                        #into single resize call
-                        img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                        imgs_scale.append(img_k)
-                    if len(imgs_scale) > 0:
-                        imgs_scale = torch.cat(imgs_scale, dim=0)
-                        im_data.append(F.resize(imgs_scale, (24, 24)))
-                 '''
-            
-                im_data = torch.cat(im_data, dim=0)
-                im_data = (im_data - 127.5) * 0.0078125
+    if len(boxes) > 0:
+        im_data = []
+        for k in range(len(y)):
+            img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+            img_k = F.resize(img_k, (24,24))
+            im_data.append(img_k)
+        '''
+        for scale in scales:
+            inds = (scale_inds == scale).nonzero().ravel().tolist()
+            imgs_scale = []
+            for k in inds:
+                #All boxes detected at same scale should be same size so they can be batched
+                #into single resize call
+                img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+                imgs_scale.append(img_k)
+            if len(imgs_scale) > 0:
+                imgs_scale = torch.cat(imgs_scale, dim=0)
+                im_data.append(F.resize(imgs_scale, (24, 24)))
+         '''
+        
+        im_data = torch.cat(im_data, dim=0)
+        im_data = (im_data - 127.5) * 0.0078125
 
-            with nvtx_range('rnet:forward'):
-            # This is equivalent to out = rnet(im_data) to avoid GPU out of memory.
-                out = rnet.forward(im_data)
+        # This is equivalent to out = rnet(im_data) to avoid GPU out of memory.
+        out = rnet.forward(im_data)
 
-            with nvtx_range('rnet:nms'):
-                out0 = out[0].permute(1, 0)
-                out1 = out[1].permute(1, 0)
-                score = out1[1, :].cpu()
-                print(torch.bincount(torch.bucketize(score, torch.linspace(0, 1, 11))))
-                ipass = (score > threshold[1]).cpu()
-                boxes = torch.cat((boxes[ipass, :4], score[ipass].unsqueeze(1)), dim=1)
-                image_inds = image_inds[ipass]
-                mv = out0[:, ipass].permute(1, 0).cpu()
+        out0 = out[0].permute(1, 0)
+        out1 = out[1].permute(1, 0)
+        score = out1[1, :].cpu()
+        ipass = (score > threshold[1]).cpu()
+        boxes = torch.cat((boxes[ipass, :4], score[ipass].unsqueeze(1)), dim=1)
+        image_inds = image_inds[ipass]
+        mv = out0[:, ipass].permute(1, 0).cpu()
 
-                # NMS within each image
-                pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
-                boxes, image_inds, mv, scale_inds = boxes[pick], image_inds[pick], mv[pick], scale_inds[pick]
-            with nvtx_range('rnet:reshape'):
-                boxes = bbreg(boxes, mv)
-                boxes = rerec(boxes)
+        # NMS within each image
+        pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
+        boxes, image_inds, mv, scale_inds = boxes[pick], image_inds[pick], mv[pick], scale_inds[pick]
+        boxes = bbreg(boxes, mv)
+        boxes = rerec(boxes)
 
 
-    with nvtx_range('onet'):
         # Third stage
-        points = torch.zeros(0, 5, 2, device=device)
-        if len(boxes) > 0:
-            with nvtx_range('onet:resample'):
-                padded_boxes = pad(boxes, w, h).cpu()
-                y = padded_boxes[0]
-                ey = padded_boxes[1]
-                x = padded_boxes[2]
-                ex = padded_boxes[3]
-                im_data = []
-                for k in range(len(y)):
-                    img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                    img_k = F.resize(img_k, (48,48))
-                    im_data.append(img_k)
-                im_data = torch.cat(im_data, dim=0)
-                im_data = (im_data - 127.5) * 0.0078125
-            
-            # This is equivalent to out = onet(im_data) to avoid GPU out of memory.
-            # This can possibly be reverted to just an onet call and we can control
-            # oom by limiting max batch size of the model at the config level
-            with nvtx_range('onet:forward'):
-                out = onet.forward(im_data)
-            
-            with nvtx_range('onet:nms'):
-                out0 = out[0].permute(1, 0)
-                out1 = out[1].permute(1, 0)
-                out2 = out[2].permute(1, 0)
-                score = out2[1, :].cpu()
-                points = out1.cpu()
-                ipass = (score > threshold[2]).cpu()
-                points = points[:, ipass]
-                boxes = torch.cat((boxes[ipass, :4], score[ipass].unsqueeze(1)), dim=1)
-                image_inds = image_inds[ipass]
-                mv = out0[:, ipass].permute(1, 0).cpu()
+    points = torch.zeros(0, 5, 2, device=device)
+    if len(boxes) > 0:
+        padded_boxes = pad(boxes, w, h).cpu()
+        y = padded_boxes[0]
+        ey = padded_boxes[1]
+        x = padded_boxes[2]
+        ex = padded_boxes[3]
+        im_data = []
+        for k in range(len(y)):
+            img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+            img_k = F.resize(img_k, (48,48))
+            im_data.append(img_k)
+        im_data = torch.cat(im_data, dim=0)
+        im_data = (im_data - 127.5) * 0.0078125
+        
+        # This is equivalent to out = onet(im_data) to avoid GPU out of memory.
+        # This can possibly be reverted to just an onet call and we can control
+        # oom by limiting max batch size of the model at the config level
+        out = onet.forward(im_data)
+        
+        out0 = out[0].permute(1, 0)
+        out1 = out[1].permute(1, 0)
+        out2 = out[2].permute(1, 0)
+        score = out2[1, :].cpu()
+        points = out1.cpu()
+        ipass = (score > threshold[2]).cpu()
+        points = points[:, ipass]
+        boxes = torch.cat((boxes[ipass, :4], score[ipass].unsqueeze(1)), dim=1)
+        image_inds = image_inds[ipass]
+        mv = out0[:, ipass].permute(1, 0).cpu()
 
-                w_i = boxes[:, 2] - boxes[:, 0] + 1
-                h_i = boxes[:, 3] - boxes[:, 1] + 1
-                points_x = w_i.repeat(5, 1) * points[:5, :] + boxes[:, 0].repeat(5, 1) - 1
-                points_y = h_i.repeat(5, 1) * points[5:10, :] + boxes[:, 1].repeat(5, 1) - 1
-                points = torch.stack((points_x, points_y)).permute(2, 1, 0)
-                boxes = bbreg(boxes, mv)
+        w_i = boxes[:, 2] - boxes[:, 0] + 1
+        h_i = boxes[:, 3] - boxes[:, 1] + 1
+        points_x = w_i.repeat(5, 1) * points[:5, :] + boxes[:, 0].repeat(5, 1) - 1
+        points_y = h_i.repeat(5, 1) * points[5:10, :] + boxes[:, 1].repeat(5, 1) - 1
+        points = torch.stack((points_x, points_y)).permute(2, 1, 0)
+        boxes = bbreg(boxes, mv)
 
-                # NMS within each image using "Min" strategy
-                # pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
-                pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
-            boxes, image_inds, points = boxes[pick], image_inds[pick], points[pick]
-        draw_boxes(imgs[0], boxes, 'onet_boxes.png')
+        # NMS within each image using "Min" strategy
+        # pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
+        pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
+        boxes, image_inds, points = boxes[pick], image_inds[pick], points[pick]
 
-    with nvtx_range('post modeling'):
-        #Remove conversion back to numpy and just return tensors
-        boxes = boxes.cpu()
-        points = points.cpu()
+    #Remove conversion back to numpy and just return tensors
+    boxes = boxes.cpu()
+    points = points.cpu()
 
-        image_inds = image_inds.cpu()
+    image_inds = image_inds.cpu()
 
-        batch_boxes = []
-        batch_points = []
-        for b_i in range(batch_size):
-            b_i_inds = torch.where(image_inds == b_i)
-            batch_boxes.append(boxes.index_select(0, b_i_inds[0]))
-            batch_points.append(points.index_select(0, b_i_inds[0]))
+    batch_boxes = []
+    batch_points = []
+    for b_i in range(batch_size):
+        b_i_inds = torch.where(image_inds == b_i)
+        batch_boxes.append(boxes.index_select(0, b_i_inds[0]))
+        batch_points.append(points.index_select(0, b_i_inds[0]))
 
-        batch_boxes, batch_points = torch.cat(batch_boxes), torch.cat(batch_points)
+    batch_boxes, batch_points = torch.cat(batch_boxes), torch.cat(batch_points)
 
     return batch_boxes, batch_points
 
+@torch.jit.ignore
 def draw_boxes(im, boxes, filename):
     im = im.permute(1,2,0).cpu().numpy()
     for box in boxes:
@@ -420,25 +398,22 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
     cellsize = 12 # Matches m Scaling Factor from line 211
 
     #(N, H, W)
-    with nvtx_range('generate_bounding_box:setup'):
-        mask = (probs >= thresh)
-        reg_ret = reg.permute(1, 0, 2, 3)[:, mask].permute(1, 0).cpu()
-        score = probs[mask].cpu()
-        mask = mask.cpu()
-        mask_inds = mask.nonzero()
-        #(0 <= I <= H*W, 3) indices of nonzero elements in 3D tensor
-    with nvtx_range('generate_bounding_box:mask_indexing'):
-        image_inds = mask_inds[:, 0] #zeros when N = 1. Indicates which image
-        #(I)
-        #(4, I) -> (I, 4)
-        bb = mask_inds[:, 1:].type(reg_ret.dtype).flip(1)
-        #(I, 2) Elements are indices from probs that are nonzero after thresholding flipped over axis 1 (W,H)
-    with nvtx_range('generate_bounding_box:tensor_creation'):
-        q1 = ((stride * bb + 1) / scale).floor()
-        # Relative X positions on Image of detection
-        q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
-        # Relative Y positions on Image of detection
-        boundingbox = torch.cat([q1, q2, score.unsqueeze(1)], dim=1)
+    mask = (probs >= thresh)
+    reg_ret = reg.permute(1, 0, 2, 3)[:, mask].permute(1, 0).cpu()
+    score = probs[mask].cpu()
+    mask = mask.cpu()
+    mask_inds = mask.nonzero()
+    #(0 <= I <= H*W, 3) indices of nonzero elements in 3D tensor
+    image_inds = mask_inds[:, 0] #zeros when N = 1. Indicates which image
+    #(I)
+    #(4, I) -> (I, 4)
+    bb = mask_inds[:, 1:].type(reg_ret.dtype).flip(1)
+    #(I, 2) Elements are indices from probs that are nonzero after thresholding flipped over axis 1 (W,H)
+    q1 = ((stride * bb + 1) / scale).floor()
+    # Relative X positions on Image of detection
+    q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
+    # Relative Y positions on Image of detection
+    boundingbox = torch.cat([q1, q2, score.unsqueeze(1)], dim=1)
     return boundingbox, image_inds, reg_ret
 
 
@@ -524,7 +499,7 @@ def pad(boxes: torch.Tensor, w: int, h: int):
     return torch.stack([y, ey, x, ex])
 
 
-def rerec(bboxA, match_area=False):
+def rerec(bboxA: torch.Tensor, match_area: bool = False):
     if bboxA.shape[0] == 0:
         return bboxA
     h = bboxA[:, 3] - bboxA[:, 1]
