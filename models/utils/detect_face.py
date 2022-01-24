@@ -242,18 +242,15 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 #NMS within each scale / image
                 with nvtx_range('pnet:scales:nms'):
                     pick = batched_nms(boxes_scale[:, :4], boxes_scale[:, 4], image_inds_scale, 0.5)
-                image_inds_scale = image_inds_scale[pick]
-                image_inds.append(image_inds_scale)
-                boxes_scale = boxes_scale[pick]
-                mv = mv[pick]
-                boxes_scale = bbreg(boxes_scale, mv)
-                boxes_scale = rerec(boxes_scale)
-                boxes.append(boxes_scale)
-                scale_inds.append(torch.ones(boxes_scale.shape[0], device=boxes_scale.device) * scale)
-
-                #All boxes from detections at same scale are same size
-                scale_picks.append(pick + offset)
-                offset += boxes_scale.shape[0]
+                with nvtx_range('pnet:scales:postprocess'):
+                    image_inds_scale = image_inds_scale[pick]
+                    image_inds.append(image_inds_scale)
+                    boxes_scale = boxes_scale[pick]
+                    mv = mv[pick]
+                    boxes_scale = bbreg(boxes_scale, mv)
+                    boxes_scale = rerec(boxes_scale, match_area=True)
+                    boxes.append(boxes_scale)
+                    scale_inds.append(torch.ones(boxes_scale.shape[0], device=boxes_scale.device) * scale)
 
         with nvtx_range('pnet:nms'):
             boxes = torch.cat(boxes, dim=0)
@@ -305,9 +302,10 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
 
                 # NMS within each image
                 pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
-                boxes, image_inds, mv = boxes[pick], image_inds[pick], mv[pick]
-            boxes = bbreg(boxes, mv)
-            boxes = rerec(boxes)
+                boxes, image_inds, mv, scale_inds = boxes[pick], image_inds[pick], mv[pick], scale_inds[pick]
+            with nvtx_range('rnet:reshape'):
+                boxes = bbreg(boxes, mv)
+                boxes = rerec(boxes)
 
     with nvtx_range('onet'):
         # Third stage
@@ -320,10 +318,15 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 x = padded_boxes[2]
                 ex = padded_boxes[3]
                 im_data = []
-                for k in range(len(y)):
-                    img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                    img_k = F.resize(img_k, (48, 48))
-                    im_data.append(img_k)
+                for scale in scales:
+                    inds = (scale_inds == scale).nonzero().ravel().tolist()
+                    imgs_scale = []
+                    for k in inds:
+                        img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+                        imgs_scale.append(img_k)
+                    if len(imgs_scale) > 0:
+                        imgs_scale = torch.cat(imgs_scale, dim=0)
+                        im_data.append(F.resize(imgs_scale, (48,48)))
                 im_data = torch.cat(im_data, dim=0)
                 im_data = (im_data - 127.5) * 0.0078125
             
@@ -407,29 +410,25 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
     stride = 2 # Convolution stride length of output kernel of pnet
     cellsize = 12 # Matches m Scaling Factor from line 211
 
-    reg = reg
-    # (4, N, H, W)
-
-    mask = (probs >= thresh)
-    reg_ret = reg.permute(1, 0, 2, 3)[:, mask].permute(1, 0).cpu()
-    mask = mask.cpu()
-    probs = probs.cpu()
     #(N, H, W)
-    with nvtx_range('generate_bounding_box:mask_nonzero'):
+    with nvtx_range('generate_bounding_box:setup'):
+        mask = (probs >= thresh)
+        reg_ret = reg.permute(1, 0, 2, 3)[:, mask].permute(1, 0).cpu()
+        score = probs[mask].cpu()
+        mask = mask.cpu()
         mask_inds = mask.nonzero()
         #(0 <= I <= H*W, 3) indices of nonzero elements in 3D tensor
     with nvtx_range('generate_bounding_box:mask_indexing'):
         image_inds = mask_inds[:, 0] #zeros when N = 1. Indicates which image
-        score = probs[mask]
         #(I)
         #(4, I) -> (I, 4)
         bb = mask_inds[:, 1:].type(reg_ret.dtype).flip(1)
         #(I, 2) Elements are indices from probs that are nonzero after thresholding flipped over axis 1 (W,H)
-    q1 = ((stride * bb + 1) / scale).floor()
-    # Relative X positions on Image of detection
-    q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
-    # Relative Y positions on Image of detection
     with nvtx_range('generate_bounding_box:tensor_creation'):
+        q1 = ((stride * bb + 1) / scale).floor()
+        # Relative X positions on Image of detection
+        q2 = ((stride * bb + cellsize - 1 + 1) / scale).floor()
+        # Relative Y positions on Image of detection
         boundingbox = torch.cat([q1, q2, score.unsqueeze(1)], dim=1)
     return boundingbox, image_inds, reg_ret
 
@@ -516,17 +515,23 @@ def pad(boxes: torch.Tensor, w: int, h: int):
     return torch.stack([y, ey, x, ex])
 
 
-def rerec(bboxA):
+def rerec(bboxA, match_area=False):
     if bboxA.shape[0] == 0:
         return bboxA
     h = bboxA[:, 3] - bboxA[:, 1]
     w = bboxA[:, 2] - bboxA[:, 0]
     
-    l = torch.floor(torch.max(torch.max(w, h)))
+    if match_area:
+        l = torch.floor(torch.max(torch.max(w, h)))
+    else:
+        l = torch.max(w, h).floor() 
 
     bboxA[:, 0] = torch.floor(bboxA[:, 0] + torch.floor(w * 0.5) - torch.floor(l * 0.5))
     bboxA[:, 1] = torch.floor(bboxA[:, 1] + torch.floor(h * 0.5) - torch.floor(l * 0.5))
-    bboxA[:, 2:4] = (bboxA[:, :2] + l).floor().int()
+    if match_area:
+        bboxA[:, 2:4] = (bboxA[:, :2] + l).floor().type(torch.int16)
+    else:
+        bboxA[:, 2:4] = (bboxA[:, :2] + l.repeat(2,1).permute(1, 0)).floor().type(torch.int16)
 
     return bboxA
 
