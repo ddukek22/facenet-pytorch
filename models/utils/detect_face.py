@@ -248,7 +248,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                     boxes_scale = boxes_scale[pick]
                     mv = mv[pick]
                     boxes_scale = bbreg(boxes_scale, mv)
-                    boxes_scale = rerec(boxes_scale, match_area=True)
+                    boxes_scale = rerec(boxes_scale, match_area=False)
                     boxes.append(boxes_scale)
                     scale_inds.append(torch.ones(boxes_scale.shape[0], device=boxes_scale.device) * scale)
 
@@ -266,13 +266,17 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             ey = padded_boxes[1]
             x = padded_boxes[2]
             ex = padded_boxes[3]
-        draw_boxes(imgs[0], boxes, 'pnet_boxes.png')
         
     with nvtx_range('rnet'):
         # Second stage
         if len(boxes) > 0:
             with nvtx_range('rnet:resample'):
                 im_data = []
+                for k in range(len(y)):
+                    img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+                    img_k = F.resize(img_k, (24,24))
+                    im_data.append(img_k)
+                '''
                 for scale in scales:
                     inds = (scale_inds == scale).nonzero().ravel().tolist()
                     imgs_scale = []
@@ -284,6 +288,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                     if len(imgs_scale) > 0:
                         imgs_scale = torch.cat(imgs_scale, dim=0)
                         im_data.append(F.resize(imgs_scale, (24, 24)))
+                 '''
             
                 im_data = torch.cat(im_data, dim=0)
                 im_data = (im_data - 127.5) * 0.0078125
@@ -296,6 +301,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 out0 = out[0].permute(1, 0)
                 out1 = out[1].permute(1, 0)
                 score = out1[1, :].cpu()
+                print(torch.bincount(torch.bucketize(score, torch.linspace(0, 1, 11))))
                 ipass = (score > threshold[1]).cpu()
                 boxes = torch.cat((boxes[ipass, :4], score[ipass].unsqueeze(1)), dim=1)
                 image_inds = image_inds[ipass]
@@ -307,7 +313,6 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             with nvtx_range('rnet:reshape'):
                 boxes = bbreg(boxes, mv)
                 boxes = rerec(boxes)
-        draw_boxes(imgs[0], boxes, 'rnet_boxes.png')
 
 
     with nvtx_range('onet'):
@@ -321,15 +326,10 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 x = padded_boxes[2]
                 ex = padded_boxes[3]
                 im_data = []
-                for scale in scales:
-                    inds = (scale_inds == scale).nonzero().ravel().tolist()
-                    imgs_scale = []
-                    for k in inds:
-                        img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
-                        imgs_scale.append(img_k)
-                    if len(imgs_scale) > 0:
-                        imgs_scale = torch.cat(imgs_scale, dim=0)
-                        im_data.append(F.resize(imgs_scale, (48,48)))
+                for k in range(len(y)):
+                    img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+                    img_k = F.resize(img_k, (48,48))
+                    im_data.append(img_k)
                 im_data = torch.cat(im_data, dim=0)
                 im_data = (im_data - 127.5) * 0.0078125
             
@@ -383,9 +383,9 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
     return batch_boxes, batch_points
 
 def draw_boxes(im, boxes, filename):
-    im = im.as_numpy()
+    im = im.permute(1,2,0).cpu().numpy()
     for box in boxes:
-        cv2.rectangle(im, (box[0], box[1]), (box[2], box[3]), (255, 0, 0), 2)
+        cv2.rectangle(im, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (255, 0, 0), 2)
     cv2.imwrite(filename, im)
 
 def bbreg(boundingbox, reg):
