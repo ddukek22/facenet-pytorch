@@ -266,6 +266,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             ey = padded_boxes[1]
             x = padded_boxes[2]
             ex = padded_boxes[3]
+        draw_boxes(imgs[0], boxes, 'pnet_boxes.png')
         
     with nvtx_range('rnet'):
         # Second stage
@@ -306,6 +307,8 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
             with nvtx_range('rnet:reshape'):
                 boxes = bbreg(boxes, mv)
                 boxes = rerec(boxes)
+        draw_boxes(imgs[0], boxes, 'rnet_boxes.png')
+
 
     with nvtx_range('onet'):
         # Third stage
@@ -359,6 +362,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
                 # pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
                 pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
             boxes, image_inds, points = boxes[pick], image_inds[pick], points[pick]
+        draw_boxes(imgs[0], boxes, 'onet_boxes.png')
 
     with nvtx_range('post modeling'):
         #Remove conversion back to numpy and just return tensors
@@ -378,6 +382,11 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
 
     return batch_boxes, batch_points
 
+def draw_boxes(im, boxes, filename):
+    im = im.as_numpy()
+    for box in boxes:
+        cv2.rectangle(im, (box[0], box[1]), (box[2], box[3]), (255, 0, 0), 2)
+    cv2.imwrite(filename, im)
 
 def bbreg(boundingbox, reg):
     if reg.shape[1] == 1:
