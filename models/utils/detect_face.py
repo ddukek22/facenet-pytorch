@@ -8,7 +8,7 @@ from PIL import Image
 import numpy as np
 import os
 import math
-import typing
+from typing import List, Tuple
 
 from ..modules import PNet, RNet, ONet
 
@@ -183,7 +183,7 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
     #Remove conversion back to numpy and just return tensors
     boxes = boxes.cpu().numpy()
     points = points.cpu().numpy()
-
+    
     image_inds = image_inds.cpu()
 
     batch_boxes = []
@@ -197,14 +197,14 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
 
     return batch_boxes, batch_points
 
-def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNet, onet: ONet, threshold: typing.List[float], factor: float, device: torch.device):
+def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNet, onet: ONet, threshold: List[float], factor: float, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     '''Remove control flow - we can just assert that imgs is a pytorch.Tensor
         The function is already written to be able to operate on torch tensors
         that are on the GPU.
     '''  
     model_dtype = torch.float32
     imgs = imgs.permute(0, 3, 1, 2).type(model_dtype)
-    batch_size = len(imgs)
+    batch_size = imgs.shape[0]
     h, w = imgs.shape[2:4]
     m = 12.0 / minsize
     minl = min(h, w)
@@ -250,17 +250,19 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
     pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
     
     boxes, image_inds, scale_inds = boxes[pick], image_inds[pick], scale_inds[pick]
-    padded_boxes = pad(boxes, w, h).cpu()
-    y = padded_boxes[0]
-    ey = padded_boxes[1]
-    x = padded_boxes[2]
-    ex = padded_boxes[3]
-        
-        # Second stage
+    padded_boxes = pad(boxes, w, h).cpu().to(torch.int64)
+            
+    # Second stage
     if len(boxes) > 0:
+        y: List[int] = padded_boxes[0].tolist()
+        ey: List[int] = padded_boxes[1].tolist()
+        x: List[int] = padded_boxes[2].tolist()
+        ex: List[int] = padded_boxes[3].tolist()
+        im_inds: List[int] = image_inds.cpu().tolist()
+
         im_data = []
         for k in range(len(y)):
-            img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+            img_k = imgs[im_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
             img_k = F.resize(img_k, (24,24))
             im_data.append(img_k)
         '''
@@ -299,16 +301,17 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
 
 
         # Third stage
-    points = torch.zeros(0, 5, 2, device=device)
     if len(boxes) > 0:
-        padded_boxes = pad(boxes, w, h).cpu()
-        y = padded_boxes[0]
-        ey = padded_boxes[1]
-        x = padded_boxes[2]
-        ex = padded_boxes[3]
+        padded_boxes = pad(boxes, w, h).cpu().to(torch.int64)
+        y: List[int] = padded_boxes[0].tolist()
+        ey: List[int] = padded_boxes[1].tolist()
+        x: List[int] = padded_boxes[2].tolist()
+        ex: List[int] = padded_boxes[3].tolist()
+        im_inds: List[int] = image_inds.cpu().tolist()
+
         im_data = []
         for k in range(len(y)):
-            img_k = imgs[image_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
+            img_k = imgs[im_inds[k], :, y[k]:ey[k], x[k]:ex[k]].unsqueeze(0)
             img_k = F.resize(img_k, (48,48))
             im_data.append(img_k)
         im_data = torch.cat(im_data, dim=0)
@@ -342,22 +345,27 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
         pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
         boxes, image_inds, points = boxes[pick], image_inds[pick], points[pick]
 
+    else:
+        points = torch.empty((1,5,2), dtype=torch.float32, device=device)
+
     #Remove conversion back to numpy and just return tensors
     boxes = boxes.cpu()
     points = points.cpu()
 
+
     image_inds = image_inds.cpu()
 
-    batch_boxes = []
-    batch_points = []
+    batch_boxes0 = []
+    batch_points0 = []
     for b_i in range(batch_size):
         b_i_inds = torch.where(image_inds == b_i)
-        batch_boxes.append(boxes.index_select(0, b_i_inds[0]))
-        batch_points.append(points.index_select(0, b_i_inds[0]))
+        batch_boxes0.append(boxes.index_select(0, b_i_inds[0]).unsqueeze_(0))
+        batch_points0.append(points.index_select(0, b_i_inds[0]).unsqueeze_(0))
 
-    batch_boxes, batch_points = torch.cat(batch_boxes), torch.cat(batch_points)
+    return_boxes = torch.cat(batch_boxes0)
+    return_points = torch.cat(batch_points0)
 
-    return batch_boxes, batch_points
+    return return_boxes, return_points
 
 @torch.jit.ignore
 def draw_boxes(im, boxes, filename):
@@ -520,7 +528,7 @@ def rerec(bboxA: torch.Tensor, match_area: bool = False):
     return bboxA
 
 
-def imresample(img: torch.Tensor, sz: typing.Tuple[int, int]) -> torch.Tensor:
+def imresample(img: torch.Tensor, sz: Tuple[int, int]) -> torch.Tensor:
     im_data = interpolate(img, size=sz, mode="area")
     return im_data
 
