@@ -341,8 +341,7 @@ def detect_face_scripted(imgs: torch.Tensor, minsize: int, pnet: PNet, rnet: RNe
         boxes = bbreg(boxes, mv)
 
         # NMS within each image using "Min" strategy
-        # pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
-        pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
+        pick = batched_nms_min_strategy(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
         boxes, image_inds, points = boxes[pick], image_inds[pick], points[pick]
 
     else:
@@ -425,46 +424,44 @@ def generateBoundingBox(reg: torch.Tensor, probs: torch.Tensor, scale: float, th
     return boundingbox, image_inds, reg_ret
 
 
-def nms_numpy(boxes, scores, threshold, method):
-    if boxes.size == 0:
-        return np.empty((0, 3))
+def nms_min_strategy(boxes: torch.Tensor, scores: torch.Tensor, threshold: float):
+    if boxes.numel() == 0:
+        return torch.empty((0, 3))
 
-    x1 = boxes[:, 0].copy()
-    y1 = boxes[:, 1].copy()
-    x2 = boxes[:, 2].copy()
-    y2 = boxes[:, 3].copy()
+    x1 = boxes[:, 0].clone()
+    y1 = boxes[:, 1].clone()
+    x2 = boxes[:, 2].clone()
+    y2 = boxes[:, 3].clone()
     s = scores
     area = (x2 - x1 + 1) * (y2 - y1 + 1)
 
-    I = np.argsort(s)
-    pick = np.zeros_like(s, dtype=np.int16)
+    I = torch.argsort(s)
+    pick = torch.zeros(s.shape, dtype=torch.int64)
+    wh_floor = torch.zeros(1)
     counter = 0
-    while I.size > 0:
+    while I.numel() > 0:
         i = I[-1]
         pick[counter] = i
         counter += 1
         idx = I[0:-1]
 
-        xx1 = np.maximum(x1[i], x1[idx]).copy()
-        yy1 = np.maximum(y1[i], y1[idx]).copy()
-        xx2 = np.minimum(x2[i], x2[idx]).copy()
-        yy2 = np.minimum(y2[i], y2[idx]).copy()
+        xx1 = torch.maximum(x1[i], x1[idx]).clone()
+        yy1 = torch.maximum(y1[i], y1[idx]).clone()
+        xx2 = torch.minimum(x2[i], x2[idx]).clone()
+        yy2 = torch.minimum(y2[i], y2[idx]).clone()
 
-        w = np.maximum(0.0, xx2 - xx1 + 1).copy()
-        h = np.maximum(0.0, yy2 - yy1 + 1).copy()
+        w = torch.maximum(wh_floor, xx2 - xx1 + 1).clone()
+        h = torch.maximum(wh_floor, yy2 - yy1 + 1).clone()
 
         inter = w * h
-        if method == 'Min':
-            o = inter / np.minimum(area[i], area[idx])
-        else:
-            o = inter / (area[i] + area[idx] - inter)
-        I = I[np.where(o <= threshold)]
+        o = inter / torch.minimum(area[i], area[idx])
+        I = idx[(o <= threshold)]
 
-    pick = pick[:counter].copy()
+    pick = pick[:counter].clone()
     return pick
 
 
-def batched_nms_numpy(boxes, scores, idxs, threshold, method):
+def batched_nms_min_strategy(boxes: torch.Tensor, scores: torch.Tensor, idxs: torch.Tensor, threshold: float):
     device = boxes.device
     if boxes.numel() == 0:
         return torch.empty((0,), dtype=torch.int64, device=device)
@@ -474,11 +471,9 @@ def batched_nms_numpy(boxes, scores, idxs, threshold, method):
     # from different classes do not overlap
     max_coordinate = boxes.max()
     offsets = idxs.to(boxes) * (max_coordinate + 1)
-    boxes_for_nms = boxes + offsets[:, None]
-    boxes_for_nms = boxes_for_nms.cpu().numpy()
-    scores = scores.cpu().numpy()
-    keep = nms_numpy(boxes_for_nms, scores, threshold, method)
-    return torch.as_tensor(keep, dtype=torch.long, device=device)
+    boxes_for_nms = (boxes.t() + offsets).t()
+    keep = nms_min_strategy(boxes_for_nms, scores, threshold)
+    return keep.to(device, dtype=torch.int64)
 
 
 def pad(boxes: torch.Tensor, w: int, h: int):
