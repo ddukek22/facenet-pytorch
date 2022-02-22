@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import numpy as np
 import os
+import typing
 
 from .utils.detect_face import detect_face_scripted
 from .modules import PNet, RNet, ONet
@@ -110,11 +111,11 @@ class MTCNN(nn.Module):
         """
 
         # Detect faces
-        batch_boxes, batch_probs, batch_points = self.detect(img, landmarks=True)
-        return batch_boxes, batch_probs, batch_points
+        img_boxes, img_probs, img_points = self.detect(img)
+        return img_boxes, img_probs, img_points
         
 
-    def detect(self, img: torch.Tensor, landmarks: bool = False):
+    def detect(self, img: torch.Tensor):
         """Detect all faces in PIL image and return bounding boxes and optional facial landmarks.
 
         This method is used by the forward method and is also useful for face detection tasks
@@ -162,19 +163,25 @@ class MTCNN(nn.Module):
                 self.device
             )
 
-        boxes, probs, points = [], [], []
-        for box, point in zip(batch_boxes, batch_points):
-                boxes.append(box[:4])
-                probs.append(torch.atleast_1d(box[4]))
-                points.append(point)
-        boxes = torch.cat(boxes)
-        probs = torch.cat(probs)
-        points = torch.cat(points)
+        '''
+        boxes_tmp = torch.jit.annotate(typing.List[float], batch_boxes.tolist())
+        points_tmp = torch.jit.annotate(typing.List[float], batch_points.tolist())
+        boxes_list = []
+        probs_list = []
+        points_list = []
+        for box, point in zip(boxes_tmp, points_tmp):
+            b = torch.as_tensor(box)
+            p = torch.as_tensor(point)
+            boxes_list.append(b[:, :4])
+            probs_list.append(torch.atleast_1d(b[:, 4]))
+            points_list.append(p)
+        '''
+        boxes1 = batch_boxes[:, :, :4].to(self.device)
+        probs1 = batch_boxes[:, :, 4].to(self.device)
+        points1 = batch_points.to(self.device)
 
-        if landmarks:
-            return boxes, probs, points
+        return boxes1, probs1, points1
 
-        return boxes, probs, None
 
     @torch.jit.ignore
     def select_boxes(
