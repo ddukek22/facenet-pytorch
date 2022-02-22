@@ -111,6 +111,7 @@ class MTCNN(nn.Module):
         """
 
         # Detect faces
+        img = img[:, :, :, [2, 1, 0]] #Input is BGR, We convert here to RGB
         img_boxes, img_probs, img_points = self.detect(img)
         return img_boxes, img_probs, img_points
         
